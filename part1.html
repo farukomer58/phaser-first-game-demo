@@ -1,0 +1,692 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>Star Hopper</title>
+    <script src="//cdn.jsdelivr.net/npm/phaser@3.11.0/dist/phaser.js"></script>
+    <style type="text/css">
+        html,
+        body {
+            margin: 0;
+            height: 100%;
+            background: #071820;
+        }
+
+        body {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+    </style>
+</head>
+
+<body>
+
+    <script type="text/javascript">
+
+        // Star Hopper, built on the Phaser 3 tutorial.
+        // New ideas in this file: dynamic platform scale, a moving platform that
+        // carries the player, double jump, lives and invincibility frames, score
+        // combos, particle bursts, camera shake, a game-over screen, and music
+        // synthesized in the browser (the assets folder has no audio files).
+
+        var config = {
+            type: Phaser.AUTO,
+            width: 1000,
+            height: 600,
+            physics: {
+                default: 'arcade',
+                arcade: {
+                    gravity: { y: 300 },
+                    debug: false
+                }
+            },
+            scene: {
+                preload: preload,
+                create: create,
+                update: update
+            }
+        };
+
+        var player;
+        var platforms;
+        var mover;
+        var cursors;
+        var wasd;
+        var jumpKey;
+        var pauseKey;
+        var restartKey;
+        var stars;
+        var bombs;
+        var starBurst;
+
+        var score = 0;
+        var bestScore = 0;
+        var bestAtStart = 0;
+        var nextLifeAt = 500;
+        var combo = 1;
+        var lastCollect = 0;
+        var level = 1;
+        var lives = 3;
+
+        var scoreText;
+        var bestText;
+        var levelText;
+        var livesText;
+        var helpText;
+        var pauseText;
+
+        var gameOver = false;
+        var paused = false;
+        var restarting = false;
+
+        // Browsers block sound until the player presses a key or clicks.
+        // One AudioContext is reused across scene.restart(), so the tune does not stack.
+        var audioCtx = null;
+        var musicStarted = false;
+        var musicStep = 0;
+        var musicTime = 0;
+
+        var textStyle = {
+            fontFamily: 'Arial, sans-serif',
+            fontSize: '22px',
+            color: '#ffffff',
+            stroke: '#003344',
+            strokeThickness: 4
+        };
+
+        function preload() {
+            this.load.image('sky', 'assets/sky.png');
+            this.load.image('ground', 'assets/platform.png');
+            this.load.image('star', 'assets/star.png');
+            this.load.image('bomb', 'assets/bomb.png');
+            this.load.spritesheet('dude', 'assets/dude.png', { frameWidth: 32, frameHeight: 48 });
+        }
+
+        function create() {
+            // scene.restart() runs create again, so every round begins from these values.
+            score = 0;
+            combo = 1;
+            lastCollect = 0;
+            level = 1;
+            lives = 3;
+            nextLifeAt = 500;
+            gameOver = false;
+            paused = false;
+            restarting = false;
+            bestScore = loadBest();
+            bestAtStart = bestScore;
+
+            var camera = this.cameras.main;
+
+            // sky.png is 800x600. Scaling draws it at the canvas size.
+            // Phaser 3.11 has setScale. setDisplaySize arrives in a later version.
+            var sky = this.add.image(camera.width / 2, camera.height / 2, 'sky');
+            sky.setScale(camera.width / sky.width, camera.height / sky.height);
+
+            // Static bodies are sized once, when create() runs. setScale changes the
+            // picture only, so refreshBody() rebuilds the collision box to match.
+            // A dynamic sprite (the player, stars, bombs) follows scale on its own.
+            platforms = this.physics.add.staticGroup();
+
+            var groundScaleX = camera.width / 400;
+            var groundScaleY = 2;
+            var ground = platforms.create(
+                camera.width / 2,
+                camera.height - (16 * groundScaleY),
+                'ground'
+            );
+            ground.setScale(groundScaleX, groundScaleY).refreshBody();
+
+            // Ledges stay on screen when the canvas is wider than the original 800.
+            platforms.create(210, 430, 'ground');
+            platforms.create(camera.width - 210, 220, 'ground');
+
+            // A static body cannot move. This ledge is a normal physics image:
+            // immovable so the player does not push it, and gravity off so it floats.
+            mover = this.physics.add.image(camera.width / 2, 330, 'ground');
+            mover.setImmovable(true);
+            mover.body.allowGravity = false;
+            mover.setVelocityX(70);
+            mover.setTint(0xc8f7d4);
+
+            player = this.physics.add.sprite(80, 480, 'dude');
+            player.setBounce(0);
+            player.setCollideWorldBounds(true);
+            player.jumps = 0;
+            player.invincible = false;
+
+            // Animations live on the game, not the scene, so a restart must not create them twice.
+            if (!this.anims.get('left')) {
+                this.anims.create({
+                    key: 'left',
+                    frames: this.anims.generateFrameNumbers('dude', { start: 0, end: 3 }),
+                    frameRate: 10,
+                    repeat: -1
+                });
+                this.anims.create({
+                    key: 'turn',
+                    frames: [{ key: 'dude', frame: 4 }],
+                    frameRate: 20
+                });
+                this.anims.create({
+                    key: 'right',
+                    frames: this.anims.generateFrameNumbers('dude', { start: 5, end: 8 }),
+                    frameRate: 10,
+                    repeat: -1
+                });
+            }
+
+            // Keys created here already cancel the browser's default action, so Space and the arrows do not scroll the page.
+            cursors = this.input.keyboard.createCursorKeys();
+            wasd = this.input.keyboard.addKeys({
+                up: Phaser.Input.Keyboard.KeyCodes.W,
+                left: Phaser.Input.Keyboard.KeyCodes.A,
+                down: Phaser.Input.Keyboard.KeyCodes.S,
+                right: Phaser.Input.Keyboard.KeyCodes.D
+            });
+            jumpKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
+            pauseKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.P);
+            restartKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.R);
+
+            if (!musicStarted) {
+                this.input.once('pointerdown', unlockAudio);
+                this.input.keyboard.once('keydown', unlockAudio);
+            }
+
+            var starCount = 12;
+            var starMargin = 70;
+            stars = this.physics.add.group({
+                key: 'star',
+                repeat: starCount - 1,
+                setXY: {
+                    x: starMargin,
+                    y: 0,
+                    stepX: (camera.width - starMargin * 2) / (starCount - 1)
+                }
+            });
+
+            stars.children.iterate(function (child) {
+                child.setBounceY(Phaser.Math.FloatBetween(0.4, 0.8));
+            });
+
+            bombs = this.physics.add.group();
+
+            // explode() fires one burst. stop() keeps it from spraying stars from the corner all game.
+            var sparks = this.add.particles('star');
+            sparks.setDepth(5);
+            starBurst = sparks.createEmitter({
+                speed: { min: 40, max: 160 },
+                scale: { start: 0.55, end: 0 },
+                lifespan: 380,
+                gravityY: 200,
+                quantity: 8,
+                blendMode: 'ADD'
+            });
+            starBurst.stop();
+
+            scoreText = this.add.text(16, 14, '', textStyle).setDepth(10);
+            bestText = this.add.text(16, 44, '', Object.assign({}, textStyle, { fontSize: '16px' })).setDepth(10);
+            levelText = this.add.text(camera.width / 2, 14, '', textStyle).setOrigin(0.5, 0).setDepth(10);
+            livesText = this.add.text(camera.width - 16, 14, '', textStyle).setOrigin(1, 0).setDepth(10);
+            helpText = this.add.text(camera.width / 2, 78,
+                'STAR HOPPER    Arrows or WASD move    Up, W, or Space jumps twice    P pauses    R restarts',
+                Object.assign({}, textStyle, { fontSize: '15px' })
+            ).setOrigin(0.5, 0).setDepth(10);
+            pauseText = this.add.text(camera.width / 2, camera.height / 2, 'Paused', {
+                fontFamily: 'Arial, sans-serif',
+                fontSize: '64px',
+                color: '#ffffff',
+                stroke: '#003344',
+                strokeThickness: 8
+            }).setOrigin(0.5).setDepth(16).setVisible(false);
+
+            this.tweens.add({
+                targets: helpText,
+                alpha: 0,
+                delay: 6500,
+                duration: 800
+            });
+
+            refreshHud();
+
+            this.physics.add.collider(player, platforms);
+            this.physics.add.collider(player, mover);
+            this.physics.add.collider(stars, platforms);
+            this.physics.add.collider(stars, mover);
+            this.physics.add.collider(bombs, platforms);
+            this.physics.add.collider(bombs, mover);
+
+            // overlap detects a touch without pushing the two bodies apart.
+            // A collider would shove the player every frame the bomb is touching them.
+            this.physics.add.overlap(player, stars, collectStar, null, this);
+            this.physics.add.overlap(player, bombs, hitBomb, null, this);
+        }
+
+        function update() {
+            if (Phaser.Input.Keyboard.JustDown(restartKey)) {
+                restartGame.call(this);
+                return;
+            }
+
+            if (gameOver) {
+                return;
+            }
+
+            if (Phaser.Input.Keyboard.JustDown(pauseKey)) {
+                paused = !paused;
+                pauseText.setVisible(paused);
+                if (paused) {
+                    this.physics.pause();
+                } else {
+                    this.physics.resume();
+                }
+            }
+
+            if (paused) {
+                return;
+            }
+
+            if (holdingLeft()) {
+                player.setVelocityX(-180);
+                player.anims.play('left', true);
+            } else if (holdingRight()) {
+                player.setVelocityX(180);
+                player.anims.play('right', true);
+            } else {
+                player.setVelocityX(0);
+                player.anims.play('turn', true);
+            }
+
+            // JustDown is true for a single frame. isDown would spend both jumps while the key is held.
+            // Landing resets the counter, so the first press is the ground jump and the next is the double jump.
+            if (player.body.touching.down) {
+                player.jumps = 0;
+            }
+
+            if (jumpPressed()) {
+                if (player.body.touching.down || player.jumps === 0) {
+                    player.setVelocityY(-340);
+                    player.jumps = 1;
+                    blip(480, 0.07, 'square', 0.035);
+                } else if (player.jumps === 1) {
+                    player.setVelocityY(-290);
+                    player.jumps = 2;
+                    blip(720, 0.07, 'square', 0.035);
+                }
+            }
+
+            // Ferry the player with the moving ledge. deltaX() is how far it moved this step.
+            var camera = this.cameras.main;
+            var speed = Math.min(150, 70 + level * 8);
+            if (mover.x >= camera.width - 280) {
+                mover.setVelocityX(-speed);
+            } else if (mover.x <= 280) {
+                mover.setVelocityX(speed);
+            }
+
+            var riding = player.body.touching.down
+                && Math.abs(player.body.bottom - mover.body.top) <= 10
+                && player.body.right > mover.body.left
+                && player.body.left < mover.body.right;
+
+            if (riding) {
+                player.x += mover.body.deltaX();
+            }
+        }
+
+        function holdingLeft() {
+            return cursors.left.isDown || wasd.left.isDown;
+        }
+
+        function holdingRight() {
+            return cursors.right.isDown || wasd.right.isDown;
+        }
+
+        function jumpPressed() {
+            return Phaser.Input.Keyboard.JustDown(cursors.up)
+                || Phaser.Input.Keyboard.JustDown(wasd.up)
+                || Phaser.Input.Keyboard.JustDown(jumpKey);
+        }
+
+        function collectStar(player, star) {
+            starBurst.explode(8, star.x, star.y);
+            star.disableBody(true, true);
+
+            var now = this.time.now;
+            if (now - lastCollect < 900) {
+                combo += 1;
+            } else {
+                combo = 1;
+            }
+            lastCollect = now;
+
+            var gained = 10 * combo;
+            score += gained;
+            rememberBest();
+            awardExtraLife.call(this);
+            refreshHud();
+            showPop(this, star.x, star.y, combo > 1 ? '+' + gained + ' x' + combo : '+' + gained);
+            blip(640 + combo * 36, 0.07, 'square', 0.04);
+
+            if (stars.countActive(true) === 0) {
+                startNextWave.call(this);
+            }
+        }
+
+        function startNextWave() {
+            level += 1;
+            score += 20 * level;
+            rememberBest();
+            awardExtraLife.call(this);
+            refreshHud();
+
+            stars.children.iterate(function (child) {
+                child.enableBody(true, child.x, 0, true, true);
+            });
+
+            // The first clear is when bombs show up. Later clears add one, up to six,
+            // and every bomb already on screen speeds up with the level.
+            if (bombs.countActive(true) < 6) {
+                spawnBomb(this);
+            }
+            speedUpBombs();
+
+            this.cameras.main.flash(180, 255, 244, 180);
+            showBanner(this, 'Level ' + level);
+            playLevelFanfare();
+        }
+
+        function spawnBomb(scene) {
+            var width = scene.cameras.main.width;
+            var x = (player.x < width / 2)
+                ? Phaser.Math.Between(Math.floor(width / 2) + 30, width - 30)
+                : Phaser.Math.Between(30, Math.floor(width / 2) - 30);
+
+            var bomb = bombs.create(x, 30, 'bomb');
+            bomb.setBounce(1);
+            bomb.setCollideWorldBounds(true);
+            // Phaser 3.11 has this method on the body. Setting bomb.allowGravity would not reach it.
+            bomb.body.setAllowGravity(false);
+            bomb.setScale(2);
+
+            var speed = 80 + level * 22;
+            var direction = Phaser.Math.Between(0, 1) === 0 ? -1 : 1;
+            bomb.setVelocity(direction * speed, Phaser.Math.Between(50, 110));
+        }
+
+        function speedUpBombs() {
+            var speed = 80 + level * 22;
+            bombs.children.iterate(function (bomb) {
+                if (!bomb.active) {
+                    return;
+                }
+                var direction = bomb.body.velocity.x < 0 ? -1 : 1;
+                bomb.setVelocity(direction * speed, bomb.body.velocity.y);
+            });
+        }
+
+        function hitBomb(player, bomb) {
+            // Overlap runs every frame while the sprites touch, and for every bomb.
+            // The flag makes the rest of a hit, and any other bomb that frame, do nothing.
+            if (gameOver || player.invincible) {
+                return;
+            }
+
+            player.invincible = true;
+            lives -= 1;
+            combo = 1;
+            refreshHud();
+
+            this.cameras.main.shake(160, 0.008);
+            player.setTint(0xff6666);
+            player.setVelocity(bomb.x < player.x ? 200 : -200, -240);
+            blip(120, 0.16, 'sawtooth', 0.05);
+
+            if (lives <= 0) {
+                endGame.call(this);
+                return;
+            }
+
+            player.blink = this.tweens.add({
+                targets: player,
+                alpha: 0.25,
+                duration: 90,
+                yoyo: true,
+                repeat: 5
+            });
+
+            this.time.delayedCall(1100, function () {
+                player.invincible = false;
+                player.clearTint();
+                player.setAlpha(1);
+                if (player.blink) {
+                    player.blink.stop();
+                }
+            }, [], this);
+        }
+
+        function endGame() {
+            gameOver = true;
+            this.physics.pause();
+            player.setTint(0xff0000);
+            player.anims.play('turn');
+            pauseText.setVisible(false);
+            helpText.setVisible(false);
+            playGameOverTune();
+
+            var camera = this.cameras.main;
+            var card = this.add.graphics().setDepth(20);
+            card.fillStyle(0x021018, 0.62);
+            card.fillRect(0, 0, camera.width, camera.height);
+            card.fillStyle(0x083044, 0.96);
+            card.fillRect(camera.width / 2 - 230, camera.height / 2 - 160, 460, 320);
+            card.lineStyle(4, 0xffffff, 1);
+            card.strokeRect(camera.width / 2 - 230, camera.height / 2 - 160, 460, 320);
+
+            var panelStyle = {
+                fontFamily: 'Arial, sans-serif',
+                color: '#ffffff',
+                align: 'center'
+            };
+
+            this.add.text(camera.width / 2, camera.height / 2 - 110, 'Game Over', Object.assign({}, panelStyle, {
+                fontSize: '52px',
+                stroke: '#003344',
+                strokeThickness: 6
+            })).setOrigin(0.5).setDepth(21);
+
+            this.add.text(camera.width / 2, camera.height / 2 - 30, 'Score  ' + score + '     Level  ' + level, Object.assign({}, panelStyle, {
+                fontSize: '26px'
+            })).setOrigin(0.5).setDepth(21);
+
+            this.add.text(camera.width / 2, camera.height / 2 + 16,
+                score > bestAtStart ? 'New best  ' + bestScore : 'Best  ' + bestScore,
+                Object.assign({}, panelStyle, { fontSize: '26px', color: '#ffe56a' })
+            ).setOrigin(0.5).setDepth(21);
+
+            this.add.text(camera.width / 2, camera.height / 2 + 90, 'Press R or click to play again', Object.assign({}, panelStyle, {
+                fontSize: '20px'
+            })).setOrigin(0.5).setDepth(21);
+
+            this.input.once('pointerdown', restartGame, this);
+        }
+
+        function restartGame() {
+            if (restarting) {
+                return;
+            }
+            restarting = true;
+            this.scene.restart();
+        }
+
+        function awardExtraLife() {
+            var gained = false;
+            while (score >= nextLifeAt && lives < 5) {
+                lives += 1;
+                nextLifeAt += 500;
+                gained = true;
+            }
+            if (gained) {
+                showPop(this, player.x, player.y - 48, '1 UP');
+                blip(880, 0.12, 'square', 0.05);
+            }
+        }
+
+        function refreshHud() {
+            scoreText.setText('Score: ' + score);
+            bestText.setText('Best: ' + bestScore);
+            levelText.setText('Level: ' + level);
+            livesText.setText('Lives: ' + lives);
+        }
+
+        function rememberBest() {
+            if (score <= bestScore) {
+                return;
+            }
+            bestScore = score;
+            try {
+                localStorage.setItem('starHopperBest', String(bestScore));
+            } catch (error) {
+                // Private browsing can block storage. The score for this visit still works.
+            }
+        }
+
+        function loadBest() {
+            try {
+                return Number(localStorage.getItem('starHopperBest')) || 0;
+            } catch (error) {
+                return 0;
+            }
+        }
+
+        function showPop(scene, x, y, message) {
+            var pop = scene.add.text(x, y, message, {
+                fontFamily: 'Arial, sans-serif',
+                fontSize: '18px',
+                color: '#fff7c2',
+                stroke: '#003344',
+                strokeThickness: 3
+            }).setOrigin(0.5).setDepth(12);
+
+            scene.tweens.add({
+                targets: pop,
+                y: y - 36,
+                alpha: 0,
+                duration: 550,
+                onComplete: function () {
+                    pop.destroy();
+                }
+            });
+        }
+
+        function showBanner(scene, message) {
+            var camera = scene.cameras.main;
+            var banner = scene.add.text(camera.width / 2, camera.height / 2 - 30, message, {
+                fontFamily: 'Arial, sans-serif',
+                fontSize: '42px',
+                color: '#ffffff',
+                stroke: '#003344',
+                strokeThickness: 6
+            }).setOrigin(0.5).setDepth(15);
+
+            scene.tweens.add({
+                targets: banner,
+                y: banner.y - 24,
+                alpha: 0,
+                delay: 450,
+                duration: 500,
+                onComplete: function () {
+                    banner.destroy();
+                }
+            });
+        }
+
+        function unlockAudio() {
+            var AudioContext = window.AudioContext || window.webkitAudioContext;
+            if (!AudioContext) {
+                return;
+            }
+            if (!audioCtx) {
+                audioCtx = new AudioContext();
+            }
+            if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+            if (!musicStarted) {
+                musicStarted = true;
+                musicTime = audioCtx.currentTime + 0.05;
+                scheduleMusic();
+            }
+        }
+
+        function tone(freq, when, duration, type, volume) {
+            if (!audioCtx) {
+                return;
+            }
+            var osc = audioCtx.createOscillator();
+            var gain = audioCtx.createGain();
+            osc.type = type;
+            osc.frequency.setValueAtTime(freq, when);
+            gain.gain.setValueAtTime(volume, when);
+            gain.gain.exponentialRampToValueAtTime(0.0001, when + duration);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start(when);
+            osc.stop(when + duration + 0.02);
+        }
+
+        function blip(freq, duration, type, volume) {
+            if (!audioCtx) {
+                return;
+            }
+            tone(freq, audioCtx.currentTime, duration, type, volume);
+        }
+
+        function scheduleMusic() {
+            if (!audioCtx) {
+                return;
+            }
+            var melody = [100, 330, 392, 150, 294, 349, 392, 330]; // this is the melody of the music, how is this formed, is it a sequence of notes? is it a sequence of frequencies?
+            if (musicTime < audioCtx.currentTime) {
+                musicTime = audioCtx.currentTime + 0.05;
+            }
+            while (musicTime < audioCtx.currentTime + 0.45) {
+                tone(melody[musicStep % melody.length], musicTime, 0.22, 'triangle', 0.022);
+                if (musicStep % 4 === 0) {
+                    tone(melody[musicStep % melody.length] / 2, musicTime, 0.4, 'sine', 0.018);
+                }
+                musicStep += 1;
+                musicTime += 0.3;
+            }
+            setTimeout(scheduleMusic, 140);
+        }
+
+        function playLevelFanfare() {
+            if (!audioCtx) {
+                return;
+            }
+            var start = audioCtx.currentTime;
+            tone(523, start, 0.1, 'square', 0.04);
+            tone(659, start + 0.1, 0.1, 'square', 0.04);
+            tone(784, start + 0.2, 0.16, 'square', 0.04);
+        }
+
+        function playGameOverTune() {
+            if (!audioCtx) {
+                return;
+            }
+            var start = audioCtx.currentTime;
+            tone(392, start, 0.16, 'triangle', 0.05);
+            tone(311, start + 0.16, 0.16, 'triangle', 0.05);
+            tone(247, start + 0.32, 0.32, 'triangle', 0.05);
+        }
+
+        var game = new Phaser.Game(config);
+
+    </script>
+
+</body>
+
+</html>
