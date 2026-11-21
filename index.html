@@ -208,7 +208,12 @@
             });
 
             stars.children.iterate(function (child) {
-                child.setBounceY(Phaser.Math.FloatBetween(0.4, 0.8));
+                // Bounce on both axes. A touch from the moving ledge copies that
+                // ledge's sideways speed onto the star. World bounds reverse it at
+                // the screen edge, so the star stays on screen and can be collected.
+                var bounce = Phaser.Math.FloatBetween(0.4, 0.8);
+                child.setBounce(bounce);
+                child.setCollideWorldBounds(true);
             });
 
             bombs = this.physics.add.group();
